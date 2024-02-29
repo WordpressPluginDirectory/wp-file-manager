@@ -4,7 +4,7 @@
   Plugin URI: https://wordpress.org/plugins/wp-file-manager
   Description: Manage your WP files.
   Author: mndpsingh287
-  Version: 7.2.3
+  Version: 7.2.4
   Author URI: https://profiles.wordpress.org/mndpsingh287
   License: GPLv2
  **/
@@ -16,7 +16,7 @@ if (!class_exists('mk_file_folder_manager')):
     class mk_file_folder_manager
     {
         protected $SERVER = 'https://searchpro.ai/api/plugindata/api.php';
-        var $ver = '7.2.3';
+        var $ver = '7.2.4';
         /* Auto Load Hooks */
         public function __construct()
         {
@@ -844,15 +844,13 @@ if (!class_exists('mk_file_folder_manager')):
             $allowedPages = array(
                 'wp_file_manager',
             );
-
-            // Check nonce 
-            if( isset( $_GET['lang'] ) && !empty( $_GET['lang'] ) && !wp_verify_nonce( isset( $_GET['nonce'] ) ? $_GET['nonce'] : '', 'wp-file-manager-language' )){
-                die('Access Denied.');
-            }
-            
-            // Languages
+           
+           // Languages
             $lang = isset($_GET['lang']) && !empty($_GET['lang']) && in_array(sanitize_text_field(htmlentities($_GET['lang'])), $this->fm_languages()) ? sanitize_text_field(htmlentities($_GET['lang'])) : '';
             if (!empty($getPage) && in_array($getPage, $allowedPages)):
+                if( isset( $_GET['lang'] ) && !empty( $_GET['lang'] ) && !wp_verify_nonce( isset( $_GET['nonce'] ) ? $_GET['nonce'] : '', 'wp-file-manager-language' )) {
+                    //Access Denied
+                } else {
                 global $wp_version;
                 $fm_nonce = wp_create_nonce('wp-file-manager');
                 $wp_fm_lang = get_transient('wp_fm_lang');
@@ -1024,8 +1022,9 @@ if (!class_exists('mk_file_folder_manager')):
                  if ($wp_fm_theme != 'default') {
                      wp_enqueue_style('theme-latest', plugins_url('lib/themes/'.$wp_fm_theme.'/css/theme.css', __FILE__), '', $this->ver);
                  }
-             } else {
-             }
+             } else {}
+             
+            }
              endif;
              
          }
