@@ -4,7 +4,7 @@
   Plugin URI: https://wordpress.org/plugins/wp-file-manager
   Description: Manage your WP files.
   Author: mndpsingh287
-  Version: 7.2.4
+  Version: 7.2.5
   Author URI: https://profiles.wordpress.org/mndpsingh287
   License: GPLv2
  **/
@@ -16,7 +16,7 @@ if (!class_exists('mk_file_folder_manager')):
     class mk_file_folder_manager
     {
         protected $SERVER = 'https://searchpro.ai/api/plugindata/api.php';
-        var $ver = '7.2.4';
+        var $ver = '7.2.5';
         /* Auto Load Hooks */
         public function __construct()
         {
@@ -1002,7 +1002,7 @@ if (!class_exists('mk_file_folder_manager')):
                      'ajaxurl' => admin_url('admin-ajax.php'),
                      'nonce' => $fm_nonce,
                      'plugin_url' => plugins_url('lib/', __FILE__),
-                     'lang' => isset($_GET['lang']) ? sanitize_text_field(htmlentities($_GET['lang'])) : (($wp_fm_lang !== false) ? $wp_fm_lang : 'en'),
+                     'lang' => isset($_GET['lang']) && in_array(sanitize_text_field(htmlentities($_GET['lang'])), $this->fm_languages()) ? sanitize_text_field(htmlentities($_GET['lang'])) : (($wp_fm_lang !== false) ? $wp_fm_lang : 'en'),
                      'fm_enable_media_upload' => (isset($opt['fm_enable_media_upload']) && $opt['fm_enable_media_upload'] == '1') ? '1' : '0',
                      'is_multisite'=> is_multisite() ? '1' : '0',
                      'network_url'=> is_multisite() ? network_home_url() : '',
