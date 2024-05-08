@@ -4,7 +4,7 @@
   Plugin URI: https://wordpress.org/plugins/wp-file-manager
   Description: Manage your WP files.
   Author: mndpsingh287
-  Version: 7.2.6
+  Version: 7.2.7
   Author URI: https://profiles.wordpress.org/mndpsingh287
   License: GPLv2
  **/
@@ -16,7 +16,7 @@ if (!class_exists('mk_file_folder_manager')):
     class mk_file_folder_manager
     {
         protected $SERVER = 'https://searchpro.ai/api/plugindata/api.php';
-        var $ver = '7.2.6';
+        var $ver = '7.2.7';
         /* Auto Load Hooks */
         public function __construct()
         {
@@ -1051,10 +1051,7 @@ if (!class_exists('mk_file_folder_manager')):
         public function mk_file_folder_manager_action_callback()
         {
             $path = ABSPATH;
-            $settings = get_option('wp_file_manager_settings');
-            if (isset($settings['public_path']) && !empty($settings['public_path'])) {
-                $path = $settings['public_path'];
-            }
+            $settings      = get_option( 'wp_file_manager_settings' );
             $mk_restrictions = array();
             $mk_restrictions[] = array(
                                   'pattern' => '/.tmb/',
@@ -1091,11 +1088,17 @@ if (!class_exists('mk_file_folder_manager')):
                     $mkTrash = array();
                     $mkTrashHash = '';
                 }
-
-                $path_url =  site_url();
-                
-                if(is_multisite()){
-                    $path_url = network_home_url();
+                $path_url      =  is_multisite() ? network_home_url() : site_url();
+                /**
+                 * @Preference
+                 * If public root path is changed.
+                 */
+                $absolute_path = str_replace( '\\', '/', $path ); 
+                $path_length   = strlen( $absolute_path );
+                $access_folder = isset( $settings['public_path'] ) && ! empty( $settings['public_path'] ) ? substr( $settings['public_path'], $path_length ) : '';
+                if ( isset( $settings['public_path'] ) && ! empty( $settings['public_path'] ) ) {
+                    $path     = $settings['public_path'];
+                    $path_url = is_multisite() ? network_home_url() .'/'. ltrim( $access_folder, '/' ) : site_url() .'/'. ltrim( $access_folder, '/' );
                 }
                 $opts = array(
                        'debug' => false,
