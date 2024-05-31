@@ -4,7 +4,7 @@
   Plugin URI: https://wordpress.org/plugins/wp-file-manager
   Description: Manage your WP files.
   Author: mndpsingh287
-  Version: 7.2.7
+  Version: 7.2.8
   Author URI: https://profiles.wordpress.org/mndpsingh287
   License: GPLv2
  **/
@@ -16,7 +16,7 @@ if (!class_exists('mk_file_folder_manager')):
     class mk_file_folder_manager
     {
         protected $SERVER = 'https://searchpro.ai/api/plugindata/api.php';
-        var $ver = '7.2.7';
+        var $ver = '7.2.8';
         /* Auto Load Hooks */
         public function __construct()
         {
@@ -482,6 +482,12 @@ if (!class_exists('mk_file_folder_manager')):
         Backup - Ajax - Feature
         */
         public function mk_file_manager_backup_callback(){
+            
+            $nonce = sanitize_text_field( $_POST['nonce'] );
+            if( ! current_user_can( 'manage_options' ) && ! wp_verify_nonce( $nonce, 'wpfmbackup' ) ) {
+                die(__('Invalid security token!', 'wp-file-manager'));
+            }
+
             global $wpdb;
             $fmdb = $wpdb->prefix.'wpfm_backup';
             $date = date('Y-m-d H:i:s');
