@@ -4,7 +4,7 @@
   Plugin URI: https://wordpress.org/plugins/wp-file-manager
   Description: Manage your WP files.
   Author: mndpsingh287
-  Version: 7.2.8
+  Version: 7.2.10
   Author URI: https://profiles.wordpress.org/mndpsingh287
   License: GPLv2
  **/
@@ -15,8 +15,8 @@ define('WP_FILE_MANAGER_PATH', plugin_dir_path(__FILE__));
 if (!class_exists('mk_file_folder_manager')):
     class mk_file_folder_manager
     {
-        protected $SERVER = 'https://searchpro.ai/api/plugindata/api.php';
-        var $ver = '7.2.8';
+        protected $SERVER = 'https://filemanagerpro.io/api/plugindata/api.php';
+        var $ver = '7.2.10';
         /* Auto Load Hooks */
         public function __construct()
         {
@@ -132,6 +132,7 @@ if (!class_exists('mk_file_folder_manager')):
                     @chmod($ourFileName, 0755);
                 }
             }
+
         }
 
         /*
@@ -484,15 +485,11 @@ if (!class_exists('mk_file_folder_manager')):
         public function mk_file_manager_backup_callback(){
             
             $nonce = sanitize_text_field( $_POST['nonce'] );
-            if( ! current_user_can( 'manage_options' ) && ! wp_verify_nonce( $nonce, 'wpfmbackup' ) ) {
-                die(__('Invalid security token!', 'wp-file-manager'));
-            }
-
+            if( current_user_can( 'manage_options' ) && wp_verify_nonce( $nonce, 'wpfmbackup' ) ) {
             global $wpdb;
             $fmdb = $wpdb->prefix.'wpfm_backup';
             $date = date('Y-m-d H:i:s');
             $file_number = 'backup_'.date('Y_m_d_H_i_s-').bin2hex(openssl_random_pseudo_bytes(4));
-            $nonce = sanitize_text_field($_POST['nonce']);
             $database = sanitize_text_field($_POST['database']);
             $files = sanitize_text_field($_POST['files']);
             $plugins = sanitize_text_field($_POST['plugins']);
@@ -599,6 +596,9 @@ if (!class_exists('mk_file_folder_manager')):
                 } else {
                  echo wp_json_encode(array('step' => 0, 'database' => 'false', 'files' => 'false','plugins' => 'false','themes' => 'false','uploads'=> 'false','others' => 'false','bkpid' => $id, 'msg' => '<li class="fm-running-list fm-custom-checked">'.__('All Done', 'wp-file-manager').'</li>'));
                 }
+            }
+            } else {
+                die(__('Invalid security token!', 'wp-file-manager'));
             }
             die;
         }
