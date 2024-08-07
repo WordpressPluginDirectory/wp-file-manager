@@ -4,7 +4,7 @@ Tags: wp-file-manager, elfinder,file manager, ftp, wp-filemanager,file manager, 
 Requires at least: 4.0
 Tested up to: 6.6.1
 Requires PHP: 5.2.4
-Stable tag: 7.2.10
+Stable tag: 8.0
 License: GPLv2 or later
 License URI: http://www.gnu.org/licenses/gpl-2.0.html
 
@@ -138,6 +138,9 @@ Yes, You can archive any files and folders as zip then simple download it. Pleas
 
 
 == Changelog ==
+
+= 8.0 (06th Aug, 2024) =
+* Broken Image Fixes
 
 = 7.2.10 (29th July, 2024) =
 * Compatible with WordPress 6.6.1
