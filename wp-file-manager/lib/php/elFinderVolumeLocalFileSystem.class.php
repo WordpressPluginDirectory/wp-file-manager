@@ -181,6 +181,8 @@ class elFinderVolumeLocalFileSystem extends elFinderVolumeDriver
         $_quarantine = '';
         if (!empty($this->options['quarantine'])) {
             if (strpos($this->options['quarantine'], DIRECTORY_SEPARATOR) === false) {
+                //$hiddens['quarantine'] = $this->options['quarantine'];
+                //$this->options['quarantine'] = $this->_abspath($this->options['quarantine']);
                 $_quarantine = $this->_abspath($this->options['quarantine']);
                 $this->options['quarantine'] = '';
             } else {

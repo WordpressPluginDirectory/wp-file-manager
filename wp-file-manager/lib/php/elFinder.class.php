@@ -32,7 +32,7 @@ class elFinder
      *
      * @var integer
      */
-    protected static $ApiRevision = 60;
+    protected static $ApiRevision = 66;
 
     /**
      * Storages (root dirs)
@@ -606,9 +606,13 @@ class elFinder
         $this->version = (string)self::$ApiVersion;
 
         // set error handler of WARNING, NOTICE
-        $errLevel = E_WARNING | E_NOTICE | E_USER_WARNING | E_USER_NOTICE | E_STRICT | E_RECOVERABLE_ERROR;
+        $errLevel = E_WARNING | E_NOTICE | E_USER_WARNING | E_USER_NOTICE | E_RECOVERABLE_ERROR;
         if (defined('E_DEPRECATED')) {
             $errLevel |= E_DEPRECATED | E_USER_DEPRECATED;
+        }
+        // E_STRICT is deprecated; see https://wiki.php.net/rfc/deprecations_php_8_4#remove_e_strict_error_level_and_deprecate_e_strict_constant
+        if (defined('E_STRICT')) {
+            $errLevel |= @E_STRICT;
         }
         set_error_handler('elFinder::phpErrorHandler', $errLevel);
 
@@ -616,6 +620,8 @@ class elFinder
         $GLOBALS['elFinderTempFps'] = array();
         // Associative array of files to delete at the end of script: ['temp file path' => true]
         $GLOBALS['elFinderTempFiles'] = array();
+        // Associative array of abort files to delete at the end of script: ['temp file path' => true]
+        $GLOBALS['elFinderAbortFiles'] = array();
         // regist Shutdown function
         register_shutdown_function(array('elFinder', 'onShutdown'));
 
@@ -766,6 +772,25 @@ class elFinder
             $this->utf8Encoder = $opts['utf8Encoder'];
         }
 
+        // for LocalFileSystem driver on Windows server
+        if (DIRECTORY_SEPARATOR !== '/') {
+            if (empty($opts['bind'])) {
+                $opts['bind'] = array();
+            }
+
+            $_key = 'upload.pre mkdir.pre mkfile.pre rename.pre archive.pre ls.pre';
+            if (!isset($opts['bind'][$_key])) {
+                $opts['bind'][$_key] = array();
+            }
+            array_push($opts['bind'][$_key], 'Plugin.WinRemoveTailDots.cmdPreprocess');
+
+            $_key = 'upload.presave paste.copyfrom';
+            if (!isset($opts['bind'][$_key])) {
+                $opts['bind'][$_key] = array();
+            }
+            array_push($opts['bind'][$_key], 'Plugin.WinRemoveTailDots.onUpLoadPreSave');
+        }
+
         // bind events listeners
         if (!empty($opts['bind']) && is_array($opts['bind'])) {
             $_req = $_SERVER["REQUEST_METHOD"] == 'POST' ? $_POST : $_GET;
@@ -773,7 +798,7 @@ class elFinder
             foreach ($opts['bind'] as $cmd => $handlers) {
                 $doRegist = (strpos($cmd, '*') !== false);
                 if (!$doRegist) {
-                    $doRegist = ($_reqCmd && in_array($_reqCmd, array_map('self::getCmdOfBind', explode(' ', $cmd))));
+                    $doRegist = ($_reqCmd && in_array($_reqCmd, array_map('elFinder::getCmdOfBind', explode(' ', $cmd))));
                 }
                 if ($doRegist) {
                     // for backward compatibility
@@ -1907,9 +1932,7 @@ class elFinder
                 }
             }
             // data check
-            if (count($targets) !== 4 ||
-                ($volume = $this->volume($targets[0])) == false ||
-                !($file = $CriOS ? $targets[1] : ( ZEND_THREAD_SAFE ? get_transient( "zipdl$targets[1]" ) : $this->session->get( 'zipdl' . $targets[1] ) ) )) {
+            if (count($targets) !== 4 || ($volume = $this->volume($targets[0])) == false || !($file = $CriOS? $targets[1] : ( ZEND_THREAD_SAFE ? get_transient( "zipdl$targets[1]" ) : $this->session->get('zipdl' . $targets[1] ) ) )) {
                 return array('error' => 'File not found', 'header' => $h404, 'raw' => true);
             }
             $path = $volume->getTempPath() . DIRECTORY_SEPARATOR . basename($file);
@@ -2568,7 +2591,7 @@ class elFinder
         if (!empty($args['makeFile'])) {
             self::$abortCheckFile = sprintf($flagFile, self::filenameDecontaminate($args['makeFile']));
             touch(self::$abortCheckFile);
-            $GLOBALS['elFinderTempFiles'][self::$abortCheckFile] = true;
+            $GLOBALS['elFinderAbortFiles'][self::$abortCheckFile] = true;
             return;
         }
 
@@ -2710,7 +2733,6 @@ class elFinder
             curl_setopt($ch, CURLOPT_FILE, $outfp);
         } else {
             curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-            curl_setopt($ch, CURLOPT_BINARYTRANSFER, true);
         }
         curl_setopt($ch, CURLOPT_LOW_SPEED_LIMIT, 1);
         curl_setopt($ch, CURLOPT_LOW_SPEED_TIME, $timeout);
@@ -3342,7 +3364,14 @@ class elFinder
                                 fclose($fp);
                                 throw $e;
                             }
-                            $_name = preg_replace('~^.*?([^/#?]+)(?:\?.*)?(?:#.*)?$~', '$1', rawurldecode($url));
+                            if (strpos($url, '%') !== false) {
+                                $url = rawurldecode($url);
+                            }
+                            if (is_callable('mb_convert_encoding') && is_callable('mb_detect_encoding')) {
+                                $url = mb_convert_encoding($url, 'UTF-8', mb_detect_encoding($url));
+                            }
+                            $url = iconv('UTF-8', 'UTF-8//IGNORE', $url);
+                            $_name = preg_replace('~^.*?([^/#?]+)(?:\?.*)?(?:#.*)?$~', '$1', $url);
                             // Check `Content-Disposition` response header
                             if (($headers = get_headers($url, true)) && !empty($headers['Content-Disposition'])) {
                                 if (preg_match('/filename\*=(?:([a-zA-Z0-9_-]+?)\'\')"?([a-z0-9_.~%-]+)"?/i', $headers['Content-Disposition'], $m)) {
@@ -4298,15 +4327,16 @@ var go = function() {
                 $proc = true;
                 break;
 
-            case E_STRICT:
-                elFinder::$phpErrors[] = "STRICT: $errstr in $errfile line $errline.";
-                $proc = true;
-                break;
-
             case E_RECOVERABLE_ERROR:
                 elFinder::$phpErrors[] = "RECOVERABLE_ERROR: $errstr in $errfile line $errline.";
                 $proc = true;
                 break;
+        }
+
+        // E_STRICT is deprecated; see https://wiki.php.net/rfc/deprecations_php_8_4#remove_e_strict_error_level_and_deprecate_e_strict_constant
+        if (defined('E_STRICT') && $errno === @E_STRICT) {
+            elFinder::$phpErrors[] = "STRICT: $errstr in $errfile line $errline.";
+            $proc = true;
         }
 
         if (defined('E_DEPRECATED')) {
@@ -5385,9 +5415,23 @@ var go = function() {
         }
         if (!empty($GLOBALS['elFinderTempFiles'])) {
             foreach (array_keys($GLOBALS['elFinderTempFiles']) as $f) {
-                is_file($f) && is_writable($f) && unlink($f);
+                //Make sure paths are safe before deleting them
+                $tf = elFinder::$commonTempPath . DIRECTORY_SEPARATOR . basename($f);
+                is_file($tf) && is_writable($tf) && unlink($tf);
             }
+        unset($f);
         }
+
+        //Delete abort file paths
+        if(!empty($GLOBALS['elFinderAbortFiles'])) {
+            foreach (array_keys($GLOBALS['elFinderAbortFiles']) as $f) {
+                //Make sure paths are safe before deleting them
+                $tf = elFinder::$connectionFlagsPath . DIRECTORY_SEPARATOR . basename($f);
+                is_file($tf) && is_writable($tf) && unlink($tf);
+            }
+            unset($f);
+        }
+
     }
 
     /**

@@ -1,10 +1,10 @@
 <?php
 /**
   Plugin Name: WP File Manager
-  Plugin URI: https://wordpress.org/plugins/wp-file-manager
+  Plugin URI: https://filemanagerpro.io/
   Description: Manage your WP files.
   Author: mndpsingh287
-  Version: 8.0.1
+  Version: 8.0.3
   Author URI: https://profiles.wordpress.org/mndpsingh287
   License: GPLv2
  **/
@@ -19,7 +19,7 @@ if (!class_exists('mk_file_folder_manager')):
     class mk_file_folder_manager
     {
         protected $SERVER = 'https://filemanagerpro.io/api/plugindata/api.php';
-        var $ver = '8.0.1';
+        var $ver = '8.0.3';
         /* Auto Load Hooks */
         public function __construct()
         {
@@ -887,7 +887,7 @@ if (!class_exists('mk_file_folder_manager')):
                 $jquery_ui_js = 'jquery-ui-1.11.4.js';
                 // 5.6 jquery ui issue fix
                 if ( version_compare( $wp_version, '5.6', '>=' ) ) {
-                    $jquery_ui_js = 'jquery-ui-1.12.1.js';
+                    $jquery_ui_js = 'jquery-ui-1.13.2.js';
                 }
 
                 wp_enqueue_script('fm_jquery_ui', plugins_url('lib/jquery/'.$jquery_ui_js, __FILE__), $this->ver);
@@ -1077,6 +1077,13 @@ if (!class_exists('mk_file_folder_manager')):
                                    'locked' => false,
                                 );
             $nonce = sanitize_text_field($_REQUEST['_wpnonce']);
+            if ( ! current_user_can('manage_options') ) {
+                status_header(403);
+                echo json_encode([
+                    'error' => 'Access denied'
+                ]);
+                exit;
+            }
             if (wp_verify_nonce($nonce, 'wp-file-manager')) {
                 require 'lib/php/autoload.php';
                 if (isset($settings['fm_enable_trash']) && $settings['fm_enable_trash'] == '1') {

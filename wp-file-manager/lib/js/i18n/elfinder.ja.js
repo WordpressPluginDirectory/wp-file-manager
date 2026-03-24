@@ -2,9 +2,9 @@
  * Japanese translation
  * @author Tomoaki Yoshida <info@yoshida-studio.jp>
  * @author Naoki Sawada <hypweb+elfinder@gmail.com>
- * @version 2022-03-02
+ * @version 2021-06-02
  */
- (function(root, factory) {
+(function(root, factory) {
 	if (typeof define === 'function' && define.amd) {
 		define(['elfinder'], factory);
 	} else if (typeof exports !== 'undefined') {
@@ -17,12 +17,10 @@
 		translator : 'Tomoaki Yoshida &lt;info@yoshida-studio.jp&gt;, Naoki Sawada &lt;hypweb+elfinder@gmail.com&gt;',
 		language   : 'Japanese',
 		direction  : 'ltr',
-		dateFormat : 'Y/m/d h:i A', // will show like: 2022/03/02 01:09 PM
-		fancyDateFormat : '$1 h:i A', // will show like: 今日 01:09 PM
-		nonameDateFormat : 'ymd-His', // noname upload will show like: 220302-130931
+		dateFormat : 'Y/m/d h:i A', // will show like: 2018/08/24 04:37 PM
+		fancyDateFormat : '$1 h:i A', // will show like: 今日 04:37 PM
+		nonameDateFormat : 'ymd-His', // noname upload will show like: 180824-163717
 		messages   : {
-			'getShareText' : '共有',
-			'Editor ': 'コードエディタ',
 
 			/********************************** errors **********************************/
 			'error'                : 'エラー',
@@ -177,6 +175,7 @@
 			'btnCancel' : 'キャンセル',
 			'btnNo'     : 'いいえ',
 			'btnYes'    : 'はい',
+			'btnDiscard': '変更を破棄',
 			'btnMount'  : 'マウント',  // added 18.04.2012
 			'btnApprove': '$1へ行き認可する', // from v2.1 added 26.04.2012
 			'btnUnmount': 'アンマウント', // from v2.1 added 30.04.2012
@@ -294,7 +293,7 @@
 			'untitled folder'   : '新規フォルダ',   // added 10.11.2015
 			'Archive'           : '新規アーカイブ',  // from v2.1 added 10.11.2015
 			'untitled file'     : '新規ファイル.$1',  // from v2.1.41 added 6.8.2018
-			'extentionfile'     : '$1: ファイル',    // from v2.1.41 added 6.8.2018
+			'extentionfile'     : '$1: ファイル',     // from v2.1.41 added 6.8.2018
 			'extentiontype'     : '$1: $2',      // from v2.1.43 added 17.10.2018
 
 			/********************************** messages **********************************/
@@ -490,7 +489,7 @@
 			'description'     : '説明', // from v2.1.43 added 19.10.2018
 			'website'         : 'ウェブサイト', // from v2.1.43 added 19.10.2018
 			'author'          : '作者', // from v2.1.43 added 19.10.2018
-			'email'           : 'Eメール', // from v2.1.43 added 19.10.2018
+			'email'           : 'Email', // from v2.1.43 added 19.10.2018
 			'license'         : 'ライセンス', // from v2.1.43 added 19.10.2018
 			'exportToSave'    : 'このアイテムは保存できません。 編集内容を失わないようにするには、PCにエクスポートする必要があります。', // from v2.1.44 added 1.12.2018
 			'dblclickToSelect': 'ファイルをダブルクリックして選択します。', // from v2.1.47 added 22.1.2019
@@ -525,6 +524,12 @@
 			'kindTTF'         : 'True Type フォント',
 			'kindOTF'         : 'Open Type フォント',
 			'kindRPM'         : 'RPM パッケージ',
+			// fonts
+			'kindFont'        : 'フォント',
+			'kindSFNT'        : 'SFNT フォント',
+			'kindEOT'         : 'Embedded Open Type フォント',
+			'kindWOFF'        : 'Web Open Font Format フォント',
+			'kindWOFF2'       : 'Web Open Font Format 2  フォント',
 			// texts
 			'kindText'        : 'Text ドキュメント',
 			'kindTextPlain'   : 'プレインテキスト',
