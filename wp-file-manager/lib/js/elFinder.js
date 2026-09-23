@@ -4579,9 +4579,16 @@
 	if (true === this.options.sound) {
 		this.bind('playsound', function(e) {
 			var play  = beeper.canPlayType && beeper.canPlayType('audio/wav; codecs="1"'),
-				file = e.data && e.data.soundFile;
-
-			play && file && play != '' && play != 'no' && jQuery(beeper).html('<source src="' + soundPath + file + '" type="audio/wav">')[0].play();
+				file = e.data && e.data.soundFile,
+				sourceEl;
+			if (play && file && play != '' && play != 'no' && /^[A-Za-z0-9_\-]+\.wav$/.test(file)) {
+				jQuery(beeper).empty();
+				sourceEl = document.createElement('source');
+				sourceEl.setAttribute('src', soundPath + file);
+				sourceEl.setAttribute('type', 'audio/wav');
+				beeper.appendChild(sourceEl);
+				beeper.play();
+			}
 		});
 	}
 
@@ -4823,10 +4830,34 @@
 		// bind window onmessage for CORS
 		jQuery(window).on('message.' + namespace, function(e){
 			var res = e.originalEvent || null,
-				obj, data;
-			if (res && (self.convAbsUrl(self.options.url).indexOf(res.origin) === 0 || self.convAbsUrl(self.uploadURL).indexOf(res.origin) === 0)) {
+				obj, data,
+				expectedOrigins;
+			expectedOrigins = [self.convAbsUrl(self.options.url), self.convAbsUrl(self.uploadURL)]
+				.map(function(u) {
+					try {
+						return (new URL(u, document.baseURI)).origin;
+					} catch (err) {
+						return null;
+					}
+				});
+			if (res && res.origin && expectedOrigins.indexOf(res.origin) !== -1) {
+				// Only elFinder's own CORS iframe/worker replies are relayed as JSON strings.
+				// Any other same-origin postMessage traffic (e.g. from Elementor, browser
+				// extensions, or other plugins sharing the page) will have res.data as a
+				// non-string (often an object), or a string that is not valid elFinder JSON.
+				// Previously such messages fell into the catch block below and forced an
+				// unconditional self.sync(), causing spurious admin-ajax.php polling and
+				// the folder tree to intermittently collapse/redraw. Bail out quietly instead.
+				if (typeof res.data !== 'string') {
+					return;
+				}
 				try {
 					obj = JSON.parse(res.data);
+					// Guard against JSON that parses fine but isn't an elFinder envelope
+					// (e.g. {"type":"..."} objects from unrelated scripts).
+					if (!obj || typeof obj !== 'object' || (typeof obj.bind === 'undefined' && typeof obj.data === 'undefined')) {
+						return;
+					}
 					data = obj.data || null;
 					if (data) {
 						if (data.error) {
@@ -4848,7 +4879,11 @@
 						}
 					}
 				} catch (e) {
-					self.sync();
+					// Malformed JSON from an unrelated same-origin postMessage sender is not
+					// a reason to force a full elFinder resync; only log for diagnostics.
+					if (window.console && window.console.warn) {
+						window.console.warn('elFinder: ignored non-elFinder postMessage payload', e);
+					}
 				}
 			}
 		});

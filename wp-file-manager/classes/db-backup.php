@@ -2,9 +2,27 @@
 /**
  * Define database parameters here
  */
-$upload_dir = wp_upload_dir();
-$backup_dirname = $upload_dir['basedir'].'/wp-file-manager-pro/fm_backup';
-define("BACKUP_DIR", $backup_dirname); // Comment this line to use same script's directory ('.')
+/**
+ * Security fix (per reviewer feedback on CVE-2026-19708 / submission
+ * #46085): resolve the backup directory through the strict, private-only,
+ * fail-closed helper -- this file is only ever included from the backup
+ * *creation* flow, which must never fall back to writing into the public
+ * uploads directory. In the ordinary AJAX flow this has already been
+ * checked by the caller before this file is included; it is re-checked
+ * here directly so this file is safe to include from anywhere in the
+ * future, not just its current single call site.
+ */
+$wpfm_backup_storage = wpfm_require_private_backup_storage_for_write();
+if ( ! $wpfm_backup_storage ) {
+    // No safe, writable, non-public location available on this host.
+    // BACKUP_DIR is intentionally left undefined so that any code below
+    // that relies on it is forced to fail rather than silently write to
+    // an unresolved/incorrect location.
+    define("BACKUP_DIR", false);
+} else {
+    $backup_dirname = rtrim($wpfm_backup_storage['path'], '/\\');
+    define("BACKUP_DIR", $backup_dirname); // Comment this line to use same script's directory ('.')
+}
 define("TABLES", '*'); // Full backup
 define("CHARSET", 'utf8');
 define("GZIP_BACKUP_FILE", true); // Set to false if you want plain SQL backup files (not gzipped)
@@ -78,15 +96,66 @@ class Backup_Database {
     /**
      * Constructor initializes database
      */
+    /**
+     * Whether the supplied filename passed strict validation.
+     * When false, backupTables() must refuse to run.
+     */
+    var $validFilename = false;
+
     public function __construct($filename) {
+        /**
+         * Security hardening (CVE-2026-19708):
+         * A backup archive must NEVER be created unless we have a
+         * non-empty, validated base filename to derive it from. Historically
+         * a missing/unresolved backup record (e.g. an invalid `bkpid`, or a
+         * multisite subsite whose `{prefix}wpfm_backup` table row could not
+         * be resolved) caused $filename to be null/empty, which produced a
+         * fixed, publicly-guessable archive name: "-db.sql.gz".
+         *
+         * We fail closed here: only accept filenames that look like the
+         * ones this plugin itself generates (backup_YYYY_MM_DD_HH_ii_ss-<hex>),
+         * and refuse everything else rather than silently falling back to
+         * an empty string or inventing a "safe-looking" substitute name
+         * while still processing an unresolved/invalid request.
+         */
+        $filename = is_string($filename) ? trim($filename) : '';
+        if ($filename !== '' && preg_match('/^[A-Za-z0-9_\-]+$/', $filename) === 1) {
+            $this->validFilename = true;
+        } else {
+            $this->validFilename = false;
+            $filename = '';
+        }
+
         $this->host                    = DB_HOST;
         $this->username                = DB_USER;
         $this->passwd                  = DB_PASSWORD;
         $this->dbName                  = DB_NAME;
         $this->charset                 = DB_CHARSET;
+        /**
+         * Security fix (per reviewer feedback on CVE-2026-19708 /
+         * submission #46085): BACKUP_DIR is `false` when no safe, writable,
+         * non-public location could be established (see the top of this
+         * file). Previously this defaulted to '.' -- the current script's
+         * own directory -- which is not a fail-closed fallback at all; it
+         * would have written the archive into classes/ inside the plugin's
+         * own directory under wp-content/plugins/, an unintended and
+         * unreviewed location. We now treat a false BACKUP_DIR exactly like
+         * an invalid filename: refuse to run.
+         */
+        if (BACKUP_DIR === false) {
+            $this->validFilename = false;
+            $filename = '';
+        }
+        $this->backupDir               = (BACKUP_DIR !== false) ? BACKUP_DIR : '';
+        $this->backupFile              = $filename !== '' ? $filename.'-db.sql' : '';
+
+        // Do not even open a DB connection for an invalid/unresolved request.
+        if (!$this->validFilename) {
+            $this->conn = null;
+            return;
+        }
+
         $this->conn                    = $this->initializeDatabase();
-        $this->backupDir               = BACKUP_DIR ? BACKUP_DIR : '.';
-        $this->backupFile              = $filename.'-db.sql';
         $this->gzipBackupFile          = defined('GZIP_BACKUP_FILE') ? GZIP_BACKUP_FILE : true;
         $this->disableForeignKeyChecks = defined('DISABLE_FOREIGN_KEY_CHECKS') ? DISABLE_FOREIGN_KEY_CHECKS : true;
         $this->batchSize               = defined('BATCH_SIZE') ? BATCH_SIZE : 1000; // default 1000 rows
@@ -117,6 +186,10 @@ class Backup_Database {
      * @param string $tables
      */
     public function backupTables($tables = '*', $bkpDir="") {
+        // Fail closed: never write an archive for an invalid/unresolved backup request.
+        if (!$this->validFilename || empty($this->backupFile) || empty($this->conn)) {
+            return false;
+        }
         try {
             /**
              * Tables to export

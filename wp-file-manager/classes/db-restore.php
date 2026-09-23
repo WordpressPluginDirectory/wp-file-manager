@@ -2,8 +2,13 @@
 /**
  * Define database parameters here
  */
-$upload_dir = wp_upload_dir();
-$backup_dirname = $upload_dir['basedir'].'/wp-file-manager-pro/fm_backup';
+/**
+ * Security hardening (CVE-2026-19708): resolve the backup directory through
+ * the shared, non-public-by-design storage helper rather than hardcoding
+ * the public uploads path. See classes/backup-storage.php.
+ */
+$wpfm_backup_storage = wpfm_get_backup_storage();
+$backup_dirname = rtrim($wpfm_backup_storage['path'], '/\\');
 define("BACKUP_DIR", $backup_dirname);
 define("CHARSET", 'utf8');
 define("DISABLE_FOREIGN_KEY_CHECKS", true);

@@ -1,7 +1,7 @@
 <?php if (!defined('ABSPATH')) { exit; } 
 $backupDirs = array('uploads.zip','plugins.zip','themes.zip','others.zip','db.sql.gz');
-$upload_dir = wp_upload_dir();
-$backup_dirname = $upload_dir['basedir'].'/wp-file-manager-pro/fm_backup/';
+$wpfm_backup_storage = wpfm_get_backup_storage();
+$backup_dirname = $wpfm_backup_storage['path'];
 $backup_baseurl = site_url().'/wp-json/v1/fm/backup/';
 $backupall_baseurl = site_url().'/wp-json/v1/fm/backupall/';
 global $wpdb;
@@ -28,6 +28,21 @@ wp_localize_script( 'fm_backup', 'fmbackupparams', array(
     'wpfmbackupremove' => wp_create_nonce( 'wpfmbackupremove' ),
     'wpfmbackuplogs' => wp_create_nonce( 'wpfmbackuplogs' ),
     'wpfmbackuprestore' => wp_create_nonce( 'wpfmbackuprestore' ),
+    /**
+     * Security/regression fix (CVE-2026-19708 audit): the backup/backupall
+     * REST routes are accessed via cookie-authenticated GET (plain
+     * `window.open()` in fm-backup.js), and WordPress core's REST API
+     * unconditionally requires a valid `wp_rest` nonce for any
+     * cookie-authenticated request, independent of this plugin's own
+     * permission_callback / capability checks. Without it, every download
+     * -- even by a fully authorized administrator -- is rejected by WP
+     * core itself with 401 "You are not currently logged in." before this
+     * plugin's own authorization logic ever runs. Supplying it here keeps
+     * downloads working for authorized users while every server-side
+     * check added for CVE-2026-19708 (capability, backup record, filename,
+     * path containment) still applies in full.
+     */
+    'wp_rest_nonce' => wp_create_nonce( 'wp_rest' ),
     'backup_running' => __('Backup is running, please wait','wp-file-manager'),
     'restore_running' => __('Restore is running, please wait','wp-file-manager'),
     'backup_empty_error' => __('Nothing selected for backup.','wp-file-manager'),

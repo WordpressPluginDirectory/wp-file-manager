@@ -4875,8 +4875,16 @@ var elFinder = function(elm, opts, bootCallback) {
 		// bind window onmessage for CORS
 		jQuery(window).on('message.' + namespace, function(e){
 			var res = e.originalEvent || null,
-				obj, data;
-			if (res && (self.convAbsUrl(self.options.url).indexOf(res.origin) === 0 || self.convAbsUrl(self.uploadURL).indexOf(res.origin) === 0)) {
+				obj, data, expectedOrigins;
+			expectedOrigins = [self.convAbsUrl(self.options.url), self.convAbsUrl(self.uploadURL)]
+				.map(function(u) {
+					try {
+						return (new URL(u, document.baseURI)).origin;
+					} catch (err) {
+						return null;
+					}
+				});
+			if (res && res.origin && expectedOrigins.indexOf(res.origin) !== -1) {
 				try {
 					try {
 						if (typeof res.data !== 'string') {

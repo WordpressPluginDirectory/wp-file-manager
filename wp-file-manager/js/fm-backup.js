@@ -280,12 +280,16 @@ jQuery(document).on('click','#fm_bkp_files', function(){
 
 jQuery(document).on("click",".bck-icon", function(){
     var key = jQuery(this).attr('data-token');
-    window.open(fmbackupparams.backup_baseurl+key);
+    /* Security/regression fix (CVE-2026-19708 audit): WordPress core's REST
+       API requires a valid wp_rest nonce for any cookie-authenticated
+       request, independent of this plugin's own capability checks. Append
+       it so authorized downloads via plain browser navigation keep working. */
+    window.open(fmbackupparams.backup_baseurl+key+'?_wpnonce='+fmbackupparams.wp_rest_nonce);
 });
 
 jQuery(document).on("click",".fm-download-all", function(){
     var selector = jQuery(this).parents('.bck_action').find('a');
     var key = jQuery(selector).attr('data-token');
     key = key+'/yes';
-    window.open(fmbackupparams.backupall_baseurl+key);
+    window.open(fmbackupparams.backupall_baseurl+key+'?_wpnonce='+fmbackupparams.wp_rest_nonce);
 });

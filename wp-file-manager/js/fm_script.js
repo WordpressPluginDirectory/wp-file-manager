@@ -11,7 +11,8 @@ jQuery(document).ready(function () {
 			url: ajaxurl,
 			data: {
 				action: "mk_fm_close_fm_help",
-				what_to_do: what_to_do
+				what_to_do: what_to_do,
+				_wpnonce: fmscript.closeHelpNonce
 			},
 			success: function (response) {
 				jQuery('.wfmrs').slideUp('slow');

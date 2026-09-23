@@ -4196,7 +4196,21 @@ class elFinder
                 } else {
                     $trigger = $triggerdone = $triggerfail = '';
                 }
-                $origin = isset($_SERVER['HTTP_ORIGIN'])? str_replace('\'', '\\\'', $_SERVER['HTTP_ORIGIN']) : '*';
+                // Never reflect an arbitrary request Origin into postMessage().
+                // The file-manager UI is same-origin with the WordPress site, so
+                // use the canonical site origin as the explicit targetOrigin.
+                $site_url_parts = wp_parse_url( site_url() );
+                $origin = '';
+                if ( ! empty( $site_url_parts['scheme'] ) && ! empty( $site_url_parts['host'] ) ) {
+                    $origin = strtolower( $site_url_parts['scheme'] ) . '://' . strtolower( $site_url_parts['host'] );
+                    if ( ! empty( $site_url_parts['port'] ) ) {
+                        $origin .= ':' . absint( $site_url_parts['port'] );
+                    }
+                }
+                $origin = str_replace( array( "'", "\\" ), array( '', "\\\\" ), $origin );
+                if ( $origin === '' ) {
+                    $origin = 'null';
+                }
                 $script .= '
 var go = function() {
     var w = window.opener || window.parent || window,

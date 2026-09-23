@@ -4,7 +4,7 @@
   Plugin URI: https://filemanagerpro.io/
   Description: Manage your WP files.
   Author: mndpsingh287
-  Version: 8.0.3
+  Version: 8.0.5
   Author URI: https://profiles.wordpress.org/mndpsingh287
   License: GPLv2
  **/
@@ -15,15 +15,33 @@ if ( ! defined( 'WP_FM_SITE_URL' ) ) {
     define( 'WP_FM_SITE_URL', 'https://filemanagerpro.io' );
 }
 define('WP_FILE_MANAGER_PATH', plugin_dir_path(__FILE__));
+
+/**
+ * Security hardening (CVE-2026-19708): shared, non-public-by-design backup
+ * storage resolution + one-time legacy-backup migration helpers. Loaded
+ * unconditionally (outside the class guard) so it is always available to
+ * every code path -- including classes/db-backup.php and inc/backup.php,
+ * which are `include`d independently of this file's class definition.
+ */
+require_once WP_FILE_MANAGER_PATH . 'classes/backup-storage.php';
+
+/**
+ * Cross-subsite database export scope fix (see classes/db-export-scope.php
+ * for full root-cause explanation). Loaded unconditionally alongside the
+ * backup-storage helper for the same reason: classes/db-backup.php is
+ * `include`d independently of this file's class definition.
+ */
+require_once WP_FILE_MANAGER_PATH . 'classes/db-export-scope.php';
+
 if (!class_exists('mk_file_folder_manager')):
     class mk_file_folder_manager
     {
         protected $SERVER = 'https://filemanagerpro.io/api/plugindata/api.php';
-        var $ver = '8.0.3';
+        var $ver = '8.0.5';
         /* Auto Load Hooks */
         public function __construct()
         {
-	        add_action('activated_plugin', array(&$this, 'deactivate_file_manager_pro'));
+            add_action('activated_plugin', array(&$this, 'deactivate_file_manager_pro'));
             add_action('admin_menu', array(&$this, 'ffm_menu_page'));
             add_action('network_admin_menu', array(&$this, 'ffm_menu_page'));
             add_action('admin_enqueue_scripts', array(&$this, 'ffm_admin_things'));
@@ -51,91 +69,164 @@ if (!class_exists('mk_file_folder_manager')):
             add_action('wp_ajax_mk_file_manager_single_backup_logs', array(&$this, 'mk_file_manager_single_backup_logs_callback'));
             add_action('wp_ajax_mk_file_manager_single_backup_restore', array(&$this, 'mk_file_manager_single_backup_restore_callback'));
             add_action( 'rest_api_init', function () {
-            if(current_user_can('manage_options') || (is_multisite() && current_user_can( 'manage_network' ))){
-                    register_rest_route( 'v1', '/fm/backup/(?P<backup_id>[a-zA-Z0-9-=]+)/(?P<type>[a-zA-Z0-9-=]+)/(?P<key>[a-zA-Z0-9-=]+)', array(
-                        'methods' => 'GET',
-                        'callback' => array( $this, 'fm_download_backup' ),
-                        'permission_callback' => '__return_true',
-                    ));
-                
-                    register_rest_route( 'v1', '/fm/backupall/(?P<backup_id>[a-zA-Z0-9-=]+)/(?P<type>[a-zA-Z0-9-=]+)/(?P<key>[a-zA-Z0-9-=]+)/(?P<all>[a-zA-Z]+)', array(
-                        'methods' => 'GET',
-                        'callback' => array( $this, 'fm_download_backup_all' ),
-                        'permission_callback' => '__return_true',
-                    ));
-                }
+                /**
+                 * Security hardening (CVE-2026-19708): register these routes
+                 * unconditionally and gate access with a real
+                 * `permission_callback` instead of only registering the
+                 * route when the *current* request's user happens to
+                 * already have the capability. The previous approach was
+                 * fragile (route availability depended on an unrelated
+                 * property of whatever request happened to trigger
+                 * `rest_api_init`) and is not how WP REST authorization is
+                 * meant to work; `fm_download_backup()` /
+                 * `fm_download_backup_all()` re-check the capability
+                 * themselves regardless, so this is defense-in-depth, not
+                 * the only check.
+                 */
+                register_rest_route( 'v1', '/fm/backup/(?P<backup_id>[a-zA-Z0-9-=]+)/(?P<type>[a-zA-Z0-9-=]+)/(?P<key>[a-zA-Z0-9-=]+)', array(
+                    'methods' => 'GET',
+                    'callback' => array( $this, 'fm_download_backup' ),
+                    'permission_callback' => array( $this, 'fm_backup_download_permission_check' ),
+                ));
+
+                register_rest_route( 'v1', '/fm/backupall/(?P<backup_id>[a-zA-Z0-9-=]+)/(?P<type>[a-zA-Z0-9-=]+)/(?P<key>[a-zA-Z0-9-=]+)/(?P<all>[a-zA-Z]+)', array(
+                    'methods' => 'GET',
+                    'callback' => array( $this, 'fm_download_backup_all' ),
+                    'permission_callback' => array( $this, 'fm_backup_download_permission_check' ),
+                ));
             });
+            /**
+             * Security hardening (CVE-2026-19708): opportunistically migrate
+             * pre-existing backups out of the public uploads directory into
+             * private storage, and keep the two multisite table-creation
+             * hooks (see below) in sync. Run on `init` (after
+             * `plugins_loaded`) so multisite's `switch_to_blog()` context is
+             * fully available.
+             */
+            add_action( 'init', array( &$this, 'wpfm_maybe_migrate_backups' ), 20 );
         }
 
-	    /**
-	     * Checks if another version of Filemanager/Filemanager PRO is active and deactivates it.
-	     * Hooked on `activated_plugin` so other plugin is deactivated when current plugin is activated.
-	     *
-	     * @return void
-	     */
-	    public function deactivate_file_manager_pro($plugin) {
+        /**
+         * Permission callback for the backup download REST routes.
+         * Kept as its own method (rather than inline in the closure above)
+         * so it can also be unit-tested / reasoned about independently of
+         * route registration.
+         */
+        public function fm_backup_download_permission_check() {
+            return current_user_can( 'manage_options' ) || ( is_multisite() && current_user_can( 'manage_network' ) );
+        }
 
-		    if ( ! in_array( $plugin, array(
-			    'wp-file-manager/file_folder_manager.php',
-			    'wp-file-manager-pro/file_folder_manager_pro.php'
-		    ), true ) ) {
-			    return;
-		    }
+        /**
+         * Return the secure backup storage path or fail closed.
+         */
+        private function wpfm_get_secure_backup_path() {
+            $storage = wpfm_get_backup_storage();
+            if ( ! is_array( $storage ) || empty( $storage['path'] ) || empty( $storage['is_private'] ) ) {
+                return false;
+            }
+            return rtrim( $storage['path'], '/\\' ) . DIRECTORY_SEPARATOR;
+        }
 
-		    $plugin_to_deactivate  = 'wp-file-manager/file_folder_manager.php';
+        /**
+         * Runs the one-time legacy backup migration (see
+         * classes/backup-storage.php) for the current site.
+         */
+        public function wpfm_maybe_migrate_backups() {
+            if ( ! function_exists( 'wpfm_migrate_legacy_backups' ) ) {
+                return;
+            }
+            wpfm_migrate_legacy_backups();
+        }
 
-		    // If we just activated the free version, deactivate the pro version.
-		    if ( $plugin === $plugin_to_deactivate ) {
-			    $plugin_to_deactivate  = 'wp-file-manager-pro/file_folder_manager_pro.php';
-		    }
+        /**
+         * Checks if another version of Filemanager/Filemanager PRO is active and deactivates it.
+         * Hooked on `activated_plugin` so other plugin is deactivated when current plugin is activated.
+         *
+         * @return void
+         */
+        public function deactivate_file_manager_pro($plugin) {
 
-		    if ( is_multisite() && is_network_admin() ) {
-			    $active_plugins = (array) get_site_option( 'active_sitewide_plugins', array() );
-			    $active_plugins = array_keys( $active_plugins );
-		    } else {
-			    $active_plugins = (array) get_option( 'active_plugins', array() );
-		    }
+            if ( ! in_array( $plugin, array(
+                'wp-file-manager/file_folder_manager.php',
+                'wp-file-manager-pro/file_folder_manager_pro.php'
+            ), true ) ) {
+                return;
+            }
 
-		    foreach ( $active_plugins as $plugin_basename ) {
-			    if ( $plugin_to_deactivate === $plugin_basename ) {
-				    deactivate_plugins( $plugin_basename );
-				    return;
-			    }
-		    }
-	    }
+            $plugin_to_deactivate  = 'wp-file-manager/file_folder_manager.php';
 
-        /* Auto Directory */
+            // If we just activated the free version, deactivate the pro version.
+            if ( $plugin === $plugin_to_deactivate ) {
+                $plugin_to_deactivate  = 'wp-file-manager-pro/file_folder_manager_pro.php';
+            }
+
+            if ( is_multisite() && is_network_admin() ) {
+                $active_plugins = (array) get_site_option( 'active_sitewide_plugins', array() );
+                $active_plugins = array_keys( $active_plugins );
+            } else {
+                $active_plugins = (array) get_option( 'active_plugins', array() );
+            }
+
+            foreach ( $active_plugins as $plugin_basename ) {
+                if ( $plugin_to_deactivate === $plugin_basename ) {
+                    deactivate_plugins( $plugin_basename );
+                    return;
+                }
+            }
+        }
+
+        /**
+         * Security hardening (CVE-2026-19708): validates that a backup
+         * database row was actually resolved and has a safe, non-empty
+         * backup_name before any code is allowed to build a filesystem path
+         * from it. Returns true only when it is safe to proceed.
+         */
+        private static function wpfm_is_valid_backup_record($fmbkp) {
+            return is_object($fmbkp)
+                && isset($fmbkp->backup_name)
+                && $fmbkp->backup_name !== ''
+                && preg_match('/^[A-Za-z0-9_\-]+$/', $fmbkp->backup_name) === 1;
+        }
+
+        /**
+         * Security hardening (CVE-2026-19708).
+         *
+         * Resolving/creating the backup directory and writing the
+         * defense-in-depth `.htaccess` / `web.config` / blank-index files
+         * for it is now centralised in wpfm_get_backup_storage() (see
+         * classes/backup-storage.php), which also prefers a location
+         * outside the public web root when the host makes that safely
+         * possible. Simply calling it here is enough to ensure the
+         * directory (private or fallback) exists and is protected.
+         *
+         * `.htaccess`/`web.config` remain an ADDITIONAL, defense-in-depth
+         * layer only -- never the primary control -- because they have no
+         * effect at all on Nginx and other non-Apache/IIS front ends. The
+         * primary controls against direct unauthenticated download are:
+         * (1) preferring non-public storage in the first place, (2) the
+         * backup/archive filename is always cryptographically randomized
+         * and is never generated for an unresolved/invalid backup request
+         * (see Backup_Database and the *_callback guards in this class),
+         * and (3) any code path that serves these files
+         * (fm_download_backup / fm_download_backup_all) enforces WordPress
+         * capability checks, backup-record validation, and strict filename
+         * validation, in addition to the possession-based key.
+         */
         public function create_auto_directory() {
+            /* New backup storage is always private and outside the public web root. */
+            $private = wpfm_require_private_backup_storage_for_write();
+
+            /* Keep defense-in-depth protection on any legacy directory until its
+             * files are migrated/removed by the security cleanup hook. */
             $upload_dir = wp_upload_dir();
-            $backup_dirname = $upload_dir['basedir'].'/wp-file-manager-pro/fm_backup';
-            if (!file_exists($backup_dirname)) {
-                wp_mkdir_p($backup_dirname);
-            }
-
-            // security fix
-            $myfile = $backup_dirname."/.htaccess";
-            if(!file_exists($myfile)){
-                $myfileHandle = @fopen($myfile, 'w+');
-                if(!is_bool($myfileHandle)){
-                     $txt = '<FilesMatch "\.(zip|gz)$">';
-                    $txt .= "\nOrder allow,deny\n";
-                    $txt .= "Deny from all\n";
-                    $txt .= "</Files>";
-                    @fwrite($myfileHandle, $txt);
-                    @fclose($myfileHandle);
+            if ( ! empty($upload_dir['basedir']) ) {
+                $legacy_dir = rtrim($upload_dir['basedir'], '/\\') . '/wp-file-manager-pro/fm_backup';
+                if ( is_dir($legacy_dir) ) {
+                    wpfm_write_backup_protection_files_at($legacy_dir);
                 }
             }
 
-            // creating blank index.php inside fm_backup
-            $ourFileName = $backup_dirname."/index.html";
-            if(!file_exists($ourFileName)){
-                $ourFileHandle = @fopen($ourFileName, 'w');
-                if(!is_bool($ourFileHandle)){
-                    @fclose($ourFileHandle);
-                    @chmod($ourFileName, 0755);
-                }
-            }
-
+            return $private;
         }
 
         /*
@@ -148,8 +239,11 @@ if (!class_exists('mk_file_folder_manager')):
             if(current_user_can('manage_options') && wp_verify_nonce( $nonce, 'wpfmbackuprestore' )) {
                 global $wpdb;
                 $fmdb = $wpdb->prefix.'wpfm_backup';
-                $upload_dir = wp_upload_dir();
-                $backup_dirname = $upload_dir['basedir'].'/wp-file-manager-pro/fm_backup/';
+                $backup_dirname = $this->wpfm_get_secure_backup_path();
+                if ( false === $backup_dirname ) {
+                    echo wp_json_encode(array('step' => 0, 'msg' => '<li class="fm-running-list fm-custom-unchecked">'.__('Secure backup storage is not available.', 'wp-file-manager').'</li>'));
+                    die;
+                }
                 $bkpid = intval($_POST['id']);
                 $result = array();
                 $filesDestination = WP_CONTENT_DIR.'/';
@@ -171,6 +265,10 @@ if (!class_exists('mk_file_folder_manager')):
                     $fmbkp = $wpdb->get_row(
                         $wpdb->prepare('select * from '.$fmdb.' where id = %d', $bkpid)
                     );
+                    if ( ! self::wpfm_is_valid_backup_record( $fmbkp ) ) {
+                        echo wp_json_encode(array('step' => 0, 'database' => 'false','plugins' => 'false','themes' => 'false', 'uploads'=> 'false', 'others' => 'false','bkpid' => '','msg' => '<li class="fm-running-list fm-custom-unchecked">'.__('Unable to resolve backup record.', 'wp-file-manager').'</li>'));
+                        die;
+                    }
                     if($themes == 'true') {
                         // case 1 - Themes
                         if(file_exists($backup_dirname.$fmbkp->backup_name.'-themes.zip')) {
@@ -318,8 +416,11 @@ if (!class_exists('mk_file_folder_manager')):
             if(current_user_can('manage_options') && wp_verify_nonce( $nonce, 'wpfmbackupremove' )) {
             global $wpdb;
             $fmdb = $wpdb->prefix.'wpfm_backup';
-            $upload_dir = wp_upload_dir();
-            $backup_dirname = $upload_dir['basedir'].'/wp-file-manager-pro/fm_backup/';
+            $backup_dirname = $this->wpfm_get_secure_backup_path();
+            if ( false === $backup_dirname ) {
+                echo __('Secure backup storage is not available!', 'wp-file-manager');
+                die;
+            }
             $bkpRids = $_POST['delarr'];
             $isRemoved = false;        
             if(isset($bkpRids)) {
@@ -328,6 +429,11 @@ if (!class_exists('mk_file_folder_manager')):
                     $fmbkp = $wpdb->get_row(
                         $wpdb->prepare('select * from '.$fmdb.' where id = %d',$bkRid)
                     );
+                    if ( ! self::wpfm_is_valid_backup_record( $fmbkp ) ) {
+                        // Nothing to safely delete on disk; still remove the orphan DB row.
+                        $wpdb->delete($fmdb, array('id' => $bkRid));
+                        continue;
+                    }
                     if(file_exists($backup_dirname.$fmbkp->backup_name.'-db.sql.gz')) {
                         unlink($backup_dirname.$fmbkp->backup_name.'-db.sql.gz');
                     }
@@ -365,8 +471,11 @@ if (!class_exists('mk_file_folder_manager')):
             if(current_user_can('manage_options') && wp_verify_nonce( $nonce, 'wpfmbackuplogs' )) {
             global $wpdb;
             $fmdb = $wpdb->prefix.'wpfm_backup';
-            $upload_dir = wp_upload_dir();
-            $backup_dirname = $upload_dir['basedir'].'/wp-file-manager-pro/fm_backup/';
+            $backup_dirname = $this->wpfm_get_secure_backup_path();
+            if ( false === $backup_dirname ) {
+                echo '<h3 class="fm_console_log_pop log_msg_align_center">'.__('Logs', 'wp-file-manager').'</h3><p class="fm_console_error">'.__('Secure backup storage is not available.', 'wp-file-manager').'</p>';
+                die;
+            }
             $bkpId = intval($_POST['id']);
             $logs = array(); 
             $logMessage = '';       
@@ -374,6 +483,11 @@ if (!class_exists('mk_file_folder_manager')):
                     $fmbkp = $wpdb->get_row(
                         $wpdb->prepare('select * from '.$fmdb.' where id = %d', $bkpId)
                     );
+                    if ( ! self::wpfm_is_valid_backup_record( $fmbkp ) ) {
+                        $fmbkp = null;
+                    }
+                }
+            if($fmbkp) {
                     if(file_exists($backup_dirname.$fmbkp->backup_name.'-db.sql.gz')) {
                         $size = filesize($backup_dirname.$fmbkp->backup_name.'-db.sql.gz');
                         $logs[] = __('Database backup done on date ', 'wp-file-manager').$fmbkp->backup_date.' ('.$fmbkp->backup_name.'-db.sql.gz) ('.$this->formatSizeUnits($size).')';
@@ -447,28 +561,33 @@ if (!class_exists('mk_file_folder_manager')):
             if(current_user_can('manage_options') && wp_verify_nonce( $nonce, 'wpfmbackupremove' )) {
             global $wpdb;
             $fmdb = $wpdb->prefix.'wpfm_backup';
-            $upload_dir = wp_upload_dir();
-            $backup_dirname = $upload_dir['basedir'].'/wp-file-manager-pro/fm_backup/';
+            $backup_dirname = $this->wpfm_get_secure_backup_path();
+            if ( false === $backup_dirname ) {
+                echo "2";
+                die;
+            }
             $bkpId = intval($_POST['id']);
             $isRemoved = false;        
             if(isset($bkpId)) {
                     $fmbkp = $wpdb->get_row(
                         $wpdb->prepare('select * from '.$fmdb.' where id = %d',$bkpId)
                     );
-                    if(file_exists($backup_dirname.$fmbkp->backup_name.'-db.sql.gz')) {
-                        unlink($backup_dirname.$fmbkp->backup_name.'-db.sql.gz');
-                    }
-                    if(file_exists($backup_dirname.$fmbkp->backup_name.'-others.zip')) {
-                        unlink($backup_dirname.$fmbkp->backup_name.'-others.zip');
-                    }
-                    if(file_exists($backup_dirname.$fmbkp->backup_name.'-plugins.zip')) {
-                        unlink($backup_dirname.$fmbkp->backup_name.'-plugins.zip');
-                    }
-                    if(file_exists($backup_dirname.$fmbkp->backup_name.'-themes.zip')) {
-                        unlink($backup_dirname.$fmbkp->backup_name.'-themes.zip');
-                    }
-                    if(file_exists($backup_dirname.$fmbkp->backup_name.'-uploads.zip')) {
-                        unlink($backup_dirname.$fmbkp->backup_name.'-uploads.zip');
+                    if ( self::wpfm_is_valid_backup_record( $fmbkp ) ) {
+                        if(file_exists($backup_dirname.$fmbkp->backup_name.'-db.sql.gz')) {
+                            unlink($backup_dirname.$fmbkp->backup_name.'-db.sql.gz');
+                        }
+                        if(file_exists($backup_dirname.$fmbkp->backup_name.'-others.zip')) {
+                            unlink($backup_dirname.$fmbkp->backup_name.'-others.zip');
+                        }
+                        if(file_exists($backup_dirname.$fmbkp->backup_name.'-plugins.zip')) {
+                            unlink($backup_dirname.$fmbkp->backup_name.'-plugins.zip');
+                        }
+                        if(file_exists($backup_dirname.$fmbkp->backup_name.'-themes.zip')) {
+                            unlink($backup_dirname.$fmbkp->backup_name.'-themes.zip');
+                        }
+                        if(file_exists($backup_dirname.$fmbkp->backup_name.'-uploads.zip')) {
+                            unlink($backup_dirname.$fmbkp->backup_name.'-uploads.zip');
+                        }
                     }
                     // removing from db
                     $wpdb->delete($fmdb, array('id' => $bkpId));
@@ -525,12 +644,66 @@ if (!class_exists('mk_file_folder_manager')):
             } else {
                 $fileName = $wpdb->get_row(
                   $wpdb->prepare("select * from ".$fmdb." where id=%d",$id)
-                );              
+                );
+
+                /**
+                 * Security hardening (CVE-2026-19708): never proceed with any
+                 * backup step (database or file archives) unless the backup
+                 * record was actually resolved and has a valid, non-empty
+                 * backup_name. Continuing with a missing/invalid record is
+                 * exactly what previously produced predictable archive
+                 * filenames (e.g. "-db.sql.gz"). Fail closed instead.
+                 */
+                if ( ! $fileName || empty( $fileName->backup_name ) || preg_match( '/^[A-Za-z0-9_\-]+$/', $fileName->backup_name ) !== 1 ) {
+                    echo wp_json_encode(array('step' => 0, 'database' => 'false','files' => 'false','plugins' => 'false','themes' => 'false', 'uploads'=> 'false', 'others' => 'false', 'bkpid' => '0', 'msg' => '<li class="fm-running-list fm-custom-unchecked">'.__('Unable to resolve backup record. Backup aborted.', 'wp-file-manager').'</li>'));
+                    die;
+                }
+
+                /**
+                 * Security fix (per reviewer feedback on CVE-2026-19708 /
+                 * submission #46085): fail closed. If this host cannot
+                 * provide a verified-safe, writable location outside the
+                 * public web root, do not create the backup at all -- do
+                 * not fall back to writing it into the public uploads
+                 * directory. Surface a clear, admin-facing error instead.
+                 * This check runs before any backup type (database, files,
+                 * plugins, themes, uploads, others) is written, so nothing
+                 * is written anywhere on failure.
+                 */
+                $wpfm_write_storage = wpfm_require_private_backup_storage_for_write();
+                if ( ! $wpfm_write_storage ) {
+                    // Remove the just-inserted backup record on a fresh
+                    // backup attempt so it doesn't linger as an orphaned,
+                    // file-less row. A continuing multi-step backup
+                    // ($bkpid already set) intentionally leaves its
+                    // existing record alone.
+                    if ( $bkpid === '' ) {
+                        $wpdb->delete( $fmdb, array( 'id' => $id ), array( '%d' ) );
+                    }
+                    echo wp_json_encode(array(
+                        'step' => 0,
+                        'database' => 'false', 'files' => 'false', 'plugins' => 'false',
+                        'themes' => 'false', 'uploads' => 'false', 'others' => 'false',
+                        'bkpid' => '0',
+                        'msg' => '<li class="fm-running-list fm-custom-unchecked">'
+                            . __( 'Backup could not be created: this server does not provide a secure, non-public location to store backup files, and creating one in the public uploads directory has been disabled for security reasons. Please contact your hosting provider or plugin support.', 'wp-file-manager' )
+                            . '</li>',
+                    ));
+                    die;
+                }
                 //database
                 if($database == 'true') {
                     include('classes/db-backup.php'); 
                     $backupDatabase = new Backup_Database($fileName->backup_name);
-                    $result = $backupDatabase->backupTables(TABLES);
+                    /**
+                     * Cross-subsite database export scope fix
+                     * (classes/db-export-scope.php): on Multisite, restrict
+                     * the export to tables that belong to the current site
+                     * instead of the TABLES constant ('*', i.e. every table
+                     * in the shared database). Single-site behaviour is
+                     * unchanged.
+                     */
+                    $result = $backupDatabase->backupTables( wpfm_get_db_export_tables() );
                     if($result == '1'){
                         echo wp_json_encode(array('step' => 1, 'database' => 'false','files' => $files,'plugins' => $plugins,'themes' => $themes, 'uploads'=> $uploads, 'others' => $others,'bkpid' => $id,'msg' => '<li class="fm-running-list fm-custom-checked">'.__('Database backup done.', 'wp-file-manager').'</li>'));  
                         die;
@@ -541,8 +714,14 @@ if (!class_exists('mk_file_folder_manager')):
                 }
                 else if($files == 'true') {
                     include('classes/files-backup.php');
-                    $upload_dir = wp_upload_dir();
-                    $backup_dirname = $upload_dir['basedir'].'/wp-file-manager-pro/fm_backup';
+                    /**
+                     * Security fix (per reviewer feedback on
+                     * CVE-2026-19708 / submission #46085): use the
+                     * already-validated private-only location from the
+                     * fail-closed check above, not the permissive
+                     * (fallback-including) resolver, for this write path.
+                     */
+                    $backup_dirname = rtrim($wpfm_write_storage['path'], '/\\');
                     $filesBackup = new wp_file_manager_files_backup();
                      // plugins
                      if($plugins == 'true') {
@@ -629,17 +808,17 @@ if (!class_exists('mk_file_folder_manager')):
                     /* Send Email Code */
                     $subject = 'Email Verification';
                     $message = "
-					<html>
-					<head>
-					<title>Email Verification</title>
-					</head>
-					<body>
-					<p>Thanks for signing up! Just click the link below to verify your email and we’ll keep you up-to-date with the latest and greatest brewing in our dev labs!</p>	
-					<p><a href='".admin_url('admin-ajax.php?action=verify_filemanager_email&token='.md5($lokhal_email))."'>Click Here to Verify
-</a></p>				
-					</body>
-					</html>
-					";
+                    <html>
+                    <head>
+                    <title>Email Verification</title>
+                    </head>
+                    <body>
+                    <p>Thanks for signing up! Just click the link below to verify your email and we’ll keep you up-to-date with the latest and greatest brewing in our dev labs!</p>    
+                    <p><a href='".admin_url('admin-ajax.php?action=verify_filemanager_email&token='.md5($lokhal_email))."'>Click Here to Verify
+</a></p>                
+                    </body>
+                    </html>
+                    ";
                     // Always set content-type when sending HTML email
                     $headers = 'MIME-Version: 1.0'."\r\n";
                     $headers .= 'Content-type:text/html;charset=UTF-8'."\r\n";
@@ -735,20 +914,20 @@ if (!class_exists('mk_file_folder_manager')):
         }
 
         /**
-		* Generate plugin key
-		**/
-		
-		private static function fm_generate_key(){
-			return substr(str_shuffle(str_repeat($x='0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ', ceil(25/strlen($x)) )),1,25);
+        * Generate plugin key
+        **/
+        
+        private static function fm_generate_key(){
+            return substr(str_shuffle(str_repeat($x='0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ', ceil(25/strlen($x)) )),1,25);
         }
         
         /**
-		* Generate plugin key
-		**/
-		
-		private static function fm_get_key(){
-			return get_option('fm_key');
-		}
+        * Generate plugin key
+        **/
+        
+        private static function fm_get_key(){
+            return get_option('fm_key');
+        }
 
         /* File Manager text Domain */
         public function filemanager_load_text_domain()
@@ -823,7 +1002,7 @@ if (!class_exists('mk_file_folder_manager')):
             if (is_admin()):
              include 'inc/system_properties.php';
             endif;
-        }	
+        }   
         /*
          Root
         */
@@ -832,8 +1011,8 @@ if (!class_exists('mk_file_folder_manager')):
             if (is_admin()):
              include 'inc/root.php';
             endif;
-        }		
-		/* System Properties */
+        }       
+        /* System Properties */
         public function wp_file_manager_logs()
         {
             if (is_admin()):
@@ -879,7 +1058,7 @@ if (!class_exists('mk_file_folder_manager')):
                  wp_enqueue_style('theme', plugins_url('lib/css/theme.css', __FILE__), '', $this->ver);
                  wp_enqueue_style('fm_toast', plugins_url('lib/css/toast.css', __FILE__), '', $this->ver);
                  wp_enqueue_style('fm_toolbar', plugins_url('lib/css/toolbar.css', __FILE__), '', $this->ver);
-				 
+                 
                  wp_enqueue_script('jquery');          
                  
                  wp_enqueue_script('fm_jquery_js', plugins_url('js/top.js', __FILE__), '', $this->ver);
@@ -1057,20 +1236,139 @@ if (!class_exists('mk_file_folder_manager')):
         * Ajax request handler
         * Run File Manager
         */
+        /**
+         * Validate the browser origin before exposing the elFinder connector.
+         *
+         * The file manager intentionally mounts ABSPATH, so this check is a
+         * server-side defense against an attacker-controlled origin attempting
+         * to use an authenticated administrator's browser session to perform
+         * file operations. Do not trust HTTP_ORIGIN by reflecting it back or
+         * by using a prefix/substring comparison; require an exact match to
+         * the WordPress admin origin.
+         *
+         * @return bool
+         */
+        private function is_file_manager_same_origin_request()
+        {
+            /*
+             * Do not hard-code localhost, ports, or production domains here.
+             * The plugin is distributed broadly, so the trusted origin must
+             * be derived from the current WordPress installation.
+             */
+            $admin_parts = wp_parse_url( admin_url() );
+
+            if ( empty( $admin_parts['scheme'] ) || empty( $admin_parts['host'] ) ) {
+                return false;
+            }
+
+            $admin_scheme = strtolower( $admin_parts['scheme'] );
+            $admin_host   = strtolower( $admin_parts['host'] );
+            $admin_port   = isset( $admin_parts['port'] ) ? (int) $admin_parts['port'] : 0;
+
+            if ( ! $admin_port ) {
+                $admin_port = ( 'https' === $admin_scheme ) ? 443 : 80;
+            }
+
+            /*
+             * Fetch Metadata is a useful defense-in-depth signal. Modern
+             * browsers send Sec-Fetch-Site on requests made by web pages.
+             * Never allow a request explicitly identified as cross-site.
+             */
+            if ( ! empty( $_SERVER['HTTP_SEC_FETCH_SITE'] )
+                && 'cross-site' === strtolower( sanitize_text_field( wp_unslash( $_SERVER['HTTP_SEC_FETCH_SITE'] ) ) ) ) {
+                return false;
+            }
+
+            /*
+             * If Origin is supplied, require an exact origin match.
+             * Do not use prefix/substring matching and do not trust an
+             * arbitrary Origin value supplied by the caller.
+             */
+            if ( ! empty( $_SERVER['HTTP_ORIGIN'] ) ) {
+                $origin = trim( wp_unslash( $_SERVER['HTTP_ORIGIN'] ) );
+
+                if ( 'null' === strtolower( $origin ) ) {
+                    return false;
+                }
+
+                $origin_parts = wp_parse_url( $origin );
+
+                if ( empty( $origin_parts['scheme'] ) || empty( $origin_parts['host'] ) ) {
+                    return false;
+                }
+
+                if ( isset( $origin_parts['user'] ) || isset( $origin_parts['pass'] )
+                    || isset( $origin_parts['path'] ) || isset( $origin_parts['query'] )
+                    || isset( $origin_parts['fragment'] ) ) {
+                    return false;
+                }
+
+                $origin_scheme = strtolower( $origin_parts['scheme'] );
+                $origin_host   = strtolower( $origin_parts['host'] );
+                $origin_port   = isset( $origin_parts['port'] ) ? (int) $origin_parts['port'] : 0;
+
+                if ( ! $origin_port ) {
+                    $origin_port = ( 'https' === $origin_scheme ) ? 443 : 80;
+                }
+
+                return hash_equals( $admin_scheme, $origin_scheme )
+                    && hash_equals( $admin_host, $origin_host )
+                    && $admin_port === $origin_port;
+            }
+
+            /*
+             * Referer is a compatibility fallback for environments where a
+             * browser does not send Origin. Compare only its origin; never
+             * use the full Referer as an authorization token.
+             */
+            if ( ! empty( $_SERVER['HTTP_REFERER'] ) ) {
+                $referer_parts = wp_parse_url( trim( wp_unslash( $_SERVER['HTTP_REFERER'] ) ) );
+
+                if ( empty( $referer_parts['scheme'] ) || empty( $referer_parts['host'] ) ) {
+                    return false;
+                }
+
+                if ( isset( $referer_parts['user'] ) || isset( $referer_parts['pass'] ) ) {
+                    return false;
+                }
+
+                $referer_scheme = strtolower( $referer_parts['scheme'] );
+                $referer_host   = strtolower( $referer_parts['host'] );
+                $referer_port   = isset( $referer_parts['port'] ) ? (int) $referer_parts['port'] : 0;
+
+                if ( ! $referer_port ) {
+                    $referer_port = ( 'https' === $referer_scheme ) ? 443 : 80;
+                }
+
+                return hash_equals( $admin_scheme, $referer_scheme )
+                    && hash_equals( $admin_host, $referer_host )
+                    && $admin_port === $referer_port;
+            }
+
+            /*
+             * Some legitimate same-origin clients/privacy configurations may
+             * omit both Origin and Referer. In that case, the endpoint still
+             * requires the existing WordPress nonce and manage_options check
+             * below. A browser explicitly reporting cross-site was already
+             * rejected above.
+             */
+            return true;
+        }
+
         public function mk_file_folder_manager_action_callback()
         {
             $path = ABSPATH;
             $settings      = get_option( 'wp_file_manager_settings' );
             $mk_restrictions = array();
             $mk_restrictions[] = array(
-                                  'pattern' => '/.tmb/',
+                                  'pattern' => '/(^|\/)\.tmb(\/|$)/',
                                    'read' => false,
                                    'write' => false,
                                    'hidden' => true,
                                    'locked' => false,
                                 );
             $mk_restrictions[] = array(
-                                  'pattern' => '/.quarantine/',
+                                  'pattern' => '/(^|\/)\.quarantine(\/|$)/',
                                    'read' => false,
                                    'write' => false,
                                    'hidden' => true,
@@ -1084,8 +1382,26 @@ if (!class_exists('mk_file_folder_manager')):
                 ]);
                 exit;
             }
-            if (wp_verify_nonce($nonce, 'wp-file-manager')) {
-                require 'lib/php/autoload.php';
+
+            if ( ! wp_verify_nonce($nonce, 'wp-file-manager') ) {
+                status_header(403);
+                echo json_encode([
+                    'error' => 'Invalid security token!'
+                ]);
+                exit;
+            }
+
+            // The connector can write anywhere below ABSPATH. Keep the
+            // intentional full-root mount, but apply origin validation after
+            // WordPress authentication/authorization checks and before the
+            // connector is initialized.
+            if ( ! $this->is_file_manager_same_origin_request() ) {
+                status_header(403);
+                nocache_headers();
+                wp_send_json_error( array( 'error' => 'Invalid request origin.' ), 403 );
+            }
+
+            require 'lib/php/autoload.php';
                 if (isset($settings['fm_enable_trash']) && $settings['fm_enable_trash'] == '1') {
                     $mkTrash = array(
                             'id' => '1',
@@ -1129,7 +1445,6 @@ if (!class_exists('mk_file_folder_manager')):
                             'uploadAllow' => array('image', 'text/plain'),
                             'uploadOrder' => array('deny', 'allow'),
                             'accessControl' => 'access',
-                            'acceptedName' => 'validName',
                             'disabled' => array('help', 'preference','hide','netmount'),
                             'attributes' => $mk_restrictions,
                         ),
@@ -1139,7 +1454,6 @@ if (!class_exists('mk_file_folder_manager')):
                 //run elFinder
                 $connector = new elFinderConnector(new elFinder($opts));
                 $connector->run();
-            }
             die;
         }
 
@@ -1176,6 +1490,14 @@ if (!class_exists('mk_file_folder_manager')):
         */
         public function mk_fm_close_fm_help()
         {
+            $nonce = isset($_POST['_wpnonce']) ? sanitize_text_field($_POST['_wpnonce']) : '';
+            if ( ! current_user_can('manage_options') || ! wp_verify_nonce($nonce, 'wp-file-manager-close-help') ) {
+                status_header(403);
+                echo json_encode([
+                    'error' => 'Access denied'
+                ]);
+                die;
+            }
             $what_to_do = sanitize_text_field($_POST['what_to_do']);
             $expire_time = 15;
             if ($what_to_do == 'rate_now' || $what_to_do == 'rate_never') {
@@ -1203,7 +1525,8 @@ if (!class_exists('mk_file_folder_manager')):
         {                 
             wp_enqueue_script('fm-custom-script', plugins_url('js/fm_script.js', __FILE__), array('jquery'), $this->ver);
             wp_localize_script( 'fm-custom-script', 'fmscript', array(
-                'nonce' => wp_create_nonce('wp-file-manager-language')
+                'nonce' => wp_create_nonce('wp-file-manager-language'),
+                'closeHelpNonce' => wp_create_nonce('wp-file-manager-close-help')
             )); 
             wp_enqueue_style('fm-custom-script-style', plugins_url('css/fm_script.css', __FILE__), '', $this->ver);
         }
@@ -1292,7 +1615,7 @@ if (!class_exists('mk_file_folder_manager')):
         /* 
         * Media Upload
         */
-        public function mk_file_folder_manager_media_upload() {	
+        public function mk_file_folder_manager_media_upload() { 
             $nonce = sanitize_text_field($_REQUEST['_wpnonce']);
             if (current_user_can('manage_options') && wp_verify_nonce($nonce, 'wp-file-manager')) {
                 $uploadedfiles = isset($_POST['uploadefiles']) ? $_POST['uploadefiles'] : '';
@@ -1313,7 +1636,7 @@ if (!class_exists('mk_file_folder_manager')):
             die;
         }
        /* Upload Images to Media Library */
-		 public function upload_to_media_library($image_url) {
+         public function upload_to_media_library($image_url) {
             $allowed_exts = array('jpg','jpe',
                 'jpeg','gif',
                 'png','svg',
@@ -1336,31 +1659,31 @@ if (!class_exists('mk_file_folder_manager')):
             $url = $image_url;
             preg_match('/[^\?]+\.(jpg|jpe|jpeg|gif|png|pdf|zip|ico|pdf|doc|docx|ppt|pptx|pps|ppsx|odt|xls|xlsx|psd|mp3|m4a|ogg|wav|mp4|m4v|mov|wmv|avi|mpg|ogv|3gp|3g2)/i', $url, $matches);
              if(isset($matches[1]) && in_array($matches[1], $allowed_exts)) {
-			// Need to require these files
-					if ( !function_exists('media_handle_upload') ) {
-						require_once(ABSPATH . "wp-admin" . '/includes/image.php');
-						require_once(ABSPATH . "wp-admin" . '/includes/file.php');
-						require_once(ABSPATH . "wp-admin" . '/includes/media.php');
-					}
-				
-					$tmp = download_url( $url );
-					$post_id = 0;
-					$desc = "";
-					$file_array = array();     
+            // Need to require these files
+                    if ( !function_exists('media_handle_upload') ) {
+                        require_once(ABSPATH . "wp-admin" . '/includes/image.php');
+                        require_once(ABSPATH . "wp-admin" . '/includes/file.php');
+                        require_once(ABSPATH . "wp-admin" . '/includes/media.php');
+                    }
+                
+                    $tmp = download_url( $url );
+                    $post_id = 0;
+                    $desc = "";
+                    $file_array = array();     
                     $file_array['name'] = basename($matches[0]);
                     $file_info = pathinfo($file_array['name']);
-					$desc = $file_info['filename'];				
-					// If error storing temporarily, unlink
-					if ( is_wp_error( $tmp ) ) {
-						@unlink($file_array['tmp_name']);
-						$file_array['tmp_name'] = '';
-					} else {
-						$file_array['tmp_name'] = $tmp;
-					}
-					$id = media_handle_sideload( $file_array, $post_id, $desc );
-					if ( is_wp_error($id) ) {
-						@unlink($file_array['tmp_name']);
-						return $id;
+                    $desc = $file_info['filename'];             
+                    // If error storing temporarily, unlink
+                    if ( is_wp_error( $tmp ) ) {
+                        @unlink($file_array['tmp_name']);
+                        $file_array['tmp_name'] = '';
+                    } else {
+                        $file_array['tmp_name'] = $tmp;
+                    }
+                    $id = media_handle_sideload( $file_array, $post_id, $desc );
+                    if ( is_wp_error($id) ) {
+                        @unlink($file_array['tmp_name']);
+                        return $id;
                     }
             }
          }
@@ -1370,6 +1693,14 @@ if (!class_exists('mk_file_folder_manager')):
          */
 
          public function fm_download_backup($request){
+            /**
+             * Security hardening (CVE-2026-19708): require an authenticated
+             * admin capability in addition to the possession-based key,
+             * regardless of how/when the REST route was registered.
+             */
+            if ( ! current_user_can('manage_options') && ! ( is_multisite() && current_user_can('manage_network') ) ) {
+                return new WP_Error( 'fm_forbidden', __( 'You are not allowed to download this backup.', 'wp-file-manager-pro' ), array( 'status' => 403 ) );
+            }
             $params = $request->get_params();
             $backup_id = isset($params["backup_id"]) ? trim($params["backup_id"]) : '';
             $type = isset($params["type"]) ? trim($params["type"]) : '';
@@ -1379,20 +1710,41 @@ if (!class_exists('mk_file_folder_manager')):
                 $fmkey = self::fm_get_key();
                 if(base64_encode(site_url().$fmkey) === $params['key']){
                     global $wpdb;
-                    $upload_dir = wp_upload_dir();
                     $backup = $wpdb->get_var(
                         $wpdb->prepare("select backup_name from ".$wpdb->prefix."wpfm_backup where id=%d",$id)
                     );
-                    $backup_dirname = $upload_dir['basedir'].'/wp-file-manager-pro/fm_backup/';
-                    $backup_baseurl = $upload_dir['baseurl'].'/wp-file-manager-pro/fm_backup/';
+                    // Never resolve/serve a file for an unknown backup id or
+                    // an unexpected backup_name value.
+                    if ( empty($backup) || preg_match('/^[A-Za-z0-9_\-]+$/', $backup) !== 1 ) {
+                        $messg = __( 'File doesn\'t exist to download.', 'wp-file-manager-pro');
+                        return new WP_Error( 'fm_file_exist', $messg, array( 'status' => 404 ) );
+                    }
+                    $backup_dirname = $this->wpfm_get_secure_backup_path();
+                    if ( false === $backup_dirname ) {
+                        return new WP_Error( 'fm_backup_storage_unavailable', __( 'Secure backup storage is not available.', 'wp-file-manager-pro' ), array( 'status' => 503 ) );
+                    }
                     if($type == "db"){
                         $bkpName = $backup.'-db.sql.gz';
                     }else{
-                        $directory_separators = ['../', './','..\\', '.\\', '..'];
-                        $type = str_replace($directory_separators, '', $type);
+                        // Restrict to the fixed, known archive types this plugin
+                        // itself generates -- do not build a path from arbitrary
+                        // user-supplied `type` text.
+                        $allowed_types = array('plugins', 'themes', 'uploads', 'others');
+                        if ( ! in_array($type, $allowed_types, true) ) {
+                            $messg = __( 'File doesn\'t exist to download.', 'wp-file-manager-pro');
+                            return new WP_Error( 'fm_file_exist', $messg, array( 'status' => 404 ) );
+                        }
                         $bkpName = $backup.'-'.$type.'.zip';
                     }
                     $file = $backup_dirname.$bkpName;
+                    // Strict path containment check: resolved file must live
+                    // inside the backup directory (no traversal possible).
+                    $real_backup_dir = realpath($backup_dirname);
+                    $real_file = realpath($file);
+                    if ( $real_backup_dir === false || $real_file === false || strpos($real_file, $real_backup_dir . DIRECTORY_SEPARATOR) !== 0 ) {
+                        $messg = __( 'File doesn\'t exist to download.', 'wp-file-manager-pro');
+                        return new WP_Error( 'fm_file_exist', $messg, array( 'status' => 404 ) );
+                    }
                     if(file_exists($file)){
                         //Set Headers:
                         $memory_limit = intval( ini_get( 'memory_limit' ) );
@@ -1445,6 +1797,13 @@ if (!class_exists('mk_file_folder_manager')):
          */
 
         public function fm_download_backup_all($request){
+            /**
+             * Security hardening (CVE-2026-19708): require an authenticated
+             * admin capability in addition to the possession-based key.
+             */
+            if ( ! current_user_can('manage_options') && ! ( is_multisite() && current_user_can('manage_network') ) ) {
+                return new WP_Error( 'fm_forbidden', __( 'You are not allowed to download this backup.', 'wp-file-manager-pro' ), array( 'status' => 403 ) );
+            }
             $params = $request->get_params();
             $backup_id = isset($params["backup_id"]) ? trim($params["backup_id"]) : '';
             $type = isset($params["type"]) ? trim($params["type"]) : '';
@@ -1455,28 +1814,99 @@ if (!class_exists('mk_file_folder_manager')):
                 $fmkey = self::fm_get_key();
                 if(base64_encode(site_url().$fmkey) === $params['key']){
                     global $wpdb;
-                    $upload_dir = wp_upload_dir();
                     $backup = $wpdb->get_var(
                         $wpdb->prepare("select backup_name from ".$wpdb->prefix."wpfm_backup where id=%d",$id)
                     );
-                    
-                    $backup_dirname = $upload_dir['basedir'].'/wp-file-manager-pro/fm_backup/';
-                    $dir_list = scandir($backup_dirname, 1);
-                    $zip = new ZipArchive(); 
-                    $zip_name = $backup."-all.zip"; 
-                    if ($zip->open($zip_name, ZIPARCHIVE::CREATE  || ZipArchive::OVERWRITE) === true) {
+                    // Never build a zip name / scan the directory for an
+                    // unresolved or unexpected backup_name.
+                    if ( empty($backup) || preg_match('/^[A-Za-z0-9_\-]+$/', $backup) !== 1 ) {
+                        $messg = __( 'File doesn\'t exist to download.', 'wp-file-manager-pro');
+                        return new WP_Error( 'fm_file_exist', $messg, array( 'status' => 404 ) );
+                    }
+
+                    $backup_dirname = $this->wpfm_get_secure_backup_path();
+                    if ( false === $backup_dirname ) {
+                        return new WP_Error( 'fm_backup_storage_unavailable', __( 'Secure backup storage is not available.', 'wp-file-manager-pro' ), array( 'status' => 503 ) );
+                    }
+                    $dir_list = @scandir($backup_dirname, 1);
+                    if ( false === $dir_list ) {
+                        return new WP_Error( 'fm_file_exist', __( 'File doesn\'t exist to download.', 'wp-file-manager-pro' ), array( 'status' => 404 ) );
+                    }
+                    $zip = new ZipArchive();
+
+                    /**
+                     * Security fix (per reviewer feedback on CVE-2026-19708 /
+                     * submission #46085): this combined zip is a new,
+                     * temporary write, not a read of an existing backup --
+                     * unlike $backup_dirname above (which must use the
+                     * permissive resolver, since existing per-file backups
+                     * may only exist in a legacy public location from
+                     * before this fix), there is no reason this new file
+                     * has to be written to that same, possibly-public,
+                     * location. Prefer verified private storage for it
+                     * when available; only fall back to writing it
+                     * alongside the source files (the prior, sole
+                     * behaviour) when private storage genuinely isn't
+                     * available on this host -- consistent with how every
+                     * other new write in this plugin now behaves. It is
+                     * still deleted immediately after being streamed to
+                     * the client either way.
+                     */
+                    $wpfm_private_storage_for_zip = wpfm_require_private_backup_storage_for_write();
+                    if ( ! $wpfm_private_storage_for_zip ) {
+                        return new WP_Error( 'fm_backup_storage_unavailable', __( 'Secure backup storage is not available.', 'wp-file-manager-pro' ), array( 'status' => 503 ) );
+                    }
+                    $zip_dirname = rtrim($wpfm_private_storage_for_zip['path'], '/\\') . DIRECTORY_SEPARATOR;
+                    $zip_name = $zip_dirname . $backup . "-all.zip";
+                    /**
+                     * Bug fix: this was `ZIPARCHIVE::CREATE || ZipArchive::OVERWRITE`
+                     * -- logical OR, not bitwise. `CREATE || OVERWRITE`
+                     * evaluates to the boolean `true` (both constants are
+                     * non-zero), which PHP then coerces to int 1 --
+                     * silently passing only CREATE's flag value and
+                     * dropping OVERWRITE entirely. Use bitwise OR so both
+                     * flags actually apply.
+                     */
+                    if ($zip->open($zip_name, ZipArchive::CREATE | ZipArchive::OVERWRITE) === true) {
+                    /**
+                     * Security fix: validate the source path before
+                     * reading it. realpath() was being called but its
+                     * result was never checked -- a false return (broken
+                     * symlink, permission error) would break the
+                     * subsequent str_replace()/file_get_contents() calls,
+                     * and there was no check that the resolved path
+                     * actually stayed inside the backup directory.
+                     * $dir_list comes from scandir($backup_dirname), so
+                     * under normal conditions every entry is already
+                     * inside it -- this is defense-in-depth against a
+                     * symlink placed inside that directory pointing
+                     * somewhere else, which would otherwise let its
+                     * target's contents be read into this downloadable
+                     * archive.
+                     */
+                    $real_backup_dir_for_all = realpath($backup_dirname);
+                    if ($real_backup_dir_for_all !== false) {
+                    $real_backup_dir_for_all = rtrim(str_replace('\\', '/', $real_backup_dir_for_all), '/') . '/';
                     foreach($dir_list as $key => $file_name){
                         $ext = pathinfo($file_name, PATHINFO_EXTENSION);
                         if($file_name != '.' && $file_name != '..' && (is_dir($backup_dirname.'/'.$file_name) || $ext == 'zip' || $ext == 'gz') ){
                           
                                 if(strpos($file_name,$backup) !== false ){
                                     $source_file = $backup_dirname.$dir_list[$key];
-                                    $source_file = str_replace('\\', '/', realpath($source_file));
-                                    $zip->addFromString(basename($source_file), file_get_contents($source_file));
+                                    $real_source_file = realpath($source_file);
+                                    if ($real_source_file === false || !is_file($real_source_file)) {
+                                        continue;
+                                    }
+                                    $real_source_file = str_replace('\\', '/', $real_source_file);
+                                    if (strpos($real_source_file, $real_backup_dir_for_all) !== 0) {
+                                        continue;
+                                    }
+                                    $zip->addFromString(basename($real_source_file), file_get_contents($real_source_file));
                                   
                                 }
                             }
                         }
+                    }
                     }
               
                     $zip->close();
@@ -1545,38 +1975,92 @@ if (!class_exists('mk_file_folder_manager')):
 endif;
 
 if(!function_exists('mk_file_folder_manager_wp_fm_create_tables')) {
-	function mk_file_folder_manager_wp_fm_create_tables(){
-		global $wpdb;
-		$table_name = $wpdb->prefix . 'wpfm_backup';
-		require_once( ABSPATH . 'wp-admin/includes/upgrade.php' );
-		if($wpdb->get_var("SHOW TABLES LIKE '$table_name'") != $table_name) {
-			$charset_collate = $wpdb->get_charset_collate();
-			$sql = "CREATE TABLE ".$table_name." (
+    function mk_file_folder_manager_wp_fm_create_tables(){
+        global $wpdb;
+        $table_name = $wpdb->prefix . 'wpfm_backup';
+        require_once( ABSPATH . 'wp-admin/includes/upgrade.php' );
+        if($wpdb->get_var("SHOW TABLES LIKE '$table_name'") != $table_name) {
+            $charset_collate = $wpdb->get_charset_collate();
+            $sql = "CREATE TABLE ".$table_name." (
                     id int(11) NOT NULL AUTO_INCREMENT,
                     backup_name text NULL,
                     backup_date text NULL,
                     PRIMARY KEY  (id)
                 ) $charset_collate;";
-			dbDelta( $sql );
-		}
-	}
+            dbDelta( $sql );
+        }
+    }
 }
 
 if(!function_exists('mk_file_folder_manager_create_tables')){
-	function mk_file_folder_manager_create_tables(){
-		if ( is_multisite() ) {
-			global $wpdb;
-			// Get all blogs in the network and activate plugin on each one
-			$blog_ids = $wpdb->get_col( "SELECT blog_id FROM $wpdb->blogs" );
-			foreach ( $blog_ids as $blog_id ) {
-				switch_to_blog( $blog_id );
-				mk_file_folder_manager_wp_fm_create_tables();
-				restore_current_blog();
-			}
-		} else {
-			mk_file_folder_manager_wp_fm_create_tables();
-		}
-	}
+    function mk_file_folder_manager_create_tables(){
+        if ( is_multisite() ) {
+            global $wpdb;
+            // Get all blogs in the network and activate plugin on each one
+            $blog_ids = $wpdb->get_col( "SELECT blog_id FROM $wpdb->blogs" );
+            foreach ( $blog_ids as $blog_id ) {
+                switch_to_blog( $blog_id );
+                mk_file_folder_manager_wp_fm_create_tables();
+                restore_current_blog();
+            }
+        } else {
+            mk_file_folder_manager_wp_fm_create_tables();
+        }
+    }
 }
 
 register_activation_hook( __FILE__, 'mk_file_folder_manager_create_tables' );
+
+/**
+ * Security hardening (CVE-2026-19708): a newly-created multisite subsite
+ * never receives the `{prefix}wpfm_backup` table unless the plugin is
+ * re-activated network-wide, and code that looks up a backup by id there
+ * silently resolves nothing -- which is exactly the missing-record
+ * condition that previously produced a predictable "-db.sql.gz" filename.
+ *
+ * `wp_initialize_site` fires for every newly created site (including ones
+ * created after this plugin was already active), so hooking it here
+ * guarantees the table exists before any backup operation can run there.
+ * mk_file_folder_manager_wp_fm_create_tables() is idempotent (it only
+ * creates the table if it does not already exist), and we always
+ * switch_to_blog()/restore_current_blog() in a try/finally-equivalent
+ * pattern so a failure mid-way never leaves $wpdb pointed at the wrong
+ * site's tables.
+ */
+if ( ! function_exists( 'mk_file_folder_manager_new_site_tables' ) ) {
+    function mk_file_folder_manager_new_site_tables( $new_site ) {
+        if ( ! function_exists( 'is_plugin_active_for_network' ) || ! function_exists( 'is_plugin_active' ) ) {
+            require_once ABSPATH . 'wp-admin/includes/plugin.php';
+        }
+        if ( ! is_plugin_active_for_network( plugin_basename( __FILE__ ) ) && ! is_plugin_active( plugin_basename( __FILE__ ) ) ) {
+            return;
+        }
+        $blog_id = is_object( $new_site ) && isset( $new_site->blog_id ) ? (int) $new_site->blog_id : (int) $new_site;
+        if ( $blog_id <= 0 ) {
+            return;
+        }
+        switch_to_blog( $blog_id );
+        try {
+            mk_file_folder_manager_wp_fm_create_tables();
+        } finally {
+            restore_current_blog();
+        }
+    }
+}
+add_action( 'wp_initialize_site', 'mk_file_folder_manager_new_site_tables', 10, 1 );
+
+/**
+ * Security hardening (CVE-2026-19708): `wp_initialize_site` (WP 5.1+) is the
+ * modern, recommended hook and is registered above, but `wpmu_new_blog` is
+ * kept as a second, redundant hook for compatibility with any environment
+ * still running a WordPress version, or a plugin/mu-plugin, that only fires
+ * the legacy hook. `mk_file_folder_manager_wp_fm_create_tables()` is
+ * idempotent (`SHOW TABLES LIKE` guard), so having both hooks fire for the
+ * same new site is harmless -- the table is simply created once.
+ */
+if ( ! function_exists( 'mk_file_folder_manager_new_blog_tables' ) ) {
+    function mk_file_folder_manager_new_blog_tables( $blog_id ) {
+        mk_file_folder_manager_new_site_tables( (int) $blog_id );
+    }
+}
+add_action( 'wpmu_new_blog', 'mk_file_folder_manager_new_blog_tables', 10, 1 );
